@@ -7,6 +7,8 @@ pub const Event = union(enum) {
     key_press: vaxis.Key,
     mouse: vaxis.Mouse,
     winsize: vaxis.Winsize,
+    color_scheme: vaxis.Color.Scheme,
+    color_report: vaxis.Color.Report,
     focus_in,
     focus_out,
 };
@@ -23,6 +25,9 @@ pub const App = struct {
     visual_mode: bool = false,
     selection_anchor: usize = 0,
     cursor_line: usize = 0,
+    focus_on_logs: bool = false,
+    color_scheme: vaxis.Color.Scheme = .dark,
+    terminal_bg: ?[3]u8 = null,
 
     tty_buf: [4096]u8 = undefined,
 
@@ -57,6 +62,8 @@ pub const App = struct {
         try self.vx.enterAltScreen(self.tty.writer());
         try self.vx.queryTerminal(self.tty.writer(), 100 * std.time.ns_per_ms);
         try self.vx.setMouseMode(self.tty.writer(), true);
+        try self.vx.subscribeToColorSchemeUpdates(self.tty.writer());
+        try self.vx.queryColor(self.tty.writer(), .bg);
 
         while (!self.should_quit) {
             // Read process output
@@ -96,10 +103,11 @@ pub const App = struct {
                     return;
                 }
                 if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-                    if (self.visual_mode) {
+                    if (self.visual_mode or self.focus_on_logs) {
                         const log = &self.manager.processes[self.selected].log;
                         if (self.cursor_line < log.lineCount() -| 1) {
                             self.cursor_line += 1;
+                            self.ensureCursorVisible();
                         }
                     } else {
                         if (self.selected < self.manager.processes.len - 1) {
@@ -111,8 +119,9 @@ pub const App = struct {
                     return;
                 }
                 if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-                    if (self.visual_mode) {
+                    if (self.visual_mode or self.focus_on_logs) {
                         self.cursor_line -|= 1;
+                        self.ensureCursorVisible();
                     } else {
                         if (self.selected > 0) {
                             self.selected -= 1;
@@ -166,13 +175,37 @@ pub const App = struct {
                 if (key.matches('v', .{})) {
                     self.visual_mode = !self.visual_mode;
                     if (self.visual_mode) {
-                        self.cursor_line = self.scroll_offset;
-                        self.selection_anchor = self.scroll_offset;
+                        // If already focused on logs, use current cursor position
+                        // Otherwise start at top of visible area
+                        if (!self.focus_on_logs) {
+                            const log = &self.manager.processes[self.selected].log;
+                            self.cursor_line = @min(self.scroll_offset, log.lineCount() -| 1);
+                        }
+                        self.selection_anchor = self.cursor_line;
+                        self.focus_on_logs = true;
+                        self.auto_scroll = false;
                     }
                     return;
                 }
                 if (key.matches(vaxis.Key.escape, .{})) {
                     self.visual_mode = false;
+                    self.focus_on_logs = false;
+                    return;
+                }
+                if (key.matches('l', .{}) or key.matches(vaxis.Key.right, .{}) or key.matches(vaxis.Key.enter, .{})) {
+                    if (!self.focus_on_logs and !self.visual_mode) {
+                        self.focus_on_logs = true;
+                        self.auto_scroll = false;
+                        // Initialize cursor to current view position
+                        const log = &self.manager.processes[self.selected].log;
+                        self.cursor_line = @min(self.scroll_offset, log.lineCount() -| 1);
+                    }
+                    return;
+                }
+                if (key.matches('h', .{}) or key.matches(vaxis.Key.left, .{})) {
+                    if (self.focus_on_logs and !self.visual_mode) {
+                        self.focus_on_logs = false;
+                    }
                     return;
                 }
                 if (key.matches('y', .{})) {
@@ -194,6 +227,8 @@ pub const App = struct {
                         self.selected = idx;
                         self.scroll_offset = 0;
                         self.auto_scroll = true;
+                        self.focus_on_logs = false;
+                        self.visual_mode = false;
                     }
                     return;
                 }
@@ -251,6 +286,14 @@ pub const App = struct {
             },
             .winsize => |ws| {
                 self.vx.resize(self.allocator, self.tty.writer(), ws) catch {};
+            },
+            .color_scheme => |scheme| {
+                self.color_scheme = scheme;
+            },
+            .color_report => |report| {
+                if (report.kind == .bg) {
+                    self.terminal_bg = report.value;
+                }
             },
             else => {},
         }
@@ -385,14 +428,67 @@ pub const App = struct {
         var line_idx = start_line;
         while (line_idx < total_lines and row < height - 1) : (line_idx += 1) {
             if (log.getLine(line_idx)) |line| {
-                const max_len = @min(line.text.len, width);
                 const is_selected = self.visual_mode and line_idx >= sel_start and line_idx <= sel_end;
-                _ = win.printSegment(.{
-                    .text = line.text[0..max_len],
-                    .style = if (is_selected) .{ .reverse = true } else .{},
-                }, .{ .col_offset = start_col, .row_offset = row });
+                const is_cursor = self.focus_on_logs and !self.visual_mode and line_idx == self.cursor_line;
+                
+                // Derive highlight colors from terminal's background
+                const cursor_bg: vaxis.Color = if (self.terminal_bg) |bg| blk: {
+                    // Shift towards gray for cursor highlight
+                    const shift: i16 = if (self.color_scheme == .light) -25 else 25;
+                    break :blk .{ .rgb = .{
+                        @intCast(std.math.clamp(@as(i16, bg[0]) + shift, 0, 255)),
+                        @intCast(std.math.clamp(@as(i16, bg[1]) + shift, 0, 255)),
+                        @intCast(std.math.clamp(@as(i16, bg[2]) + shift, 0, 255)),
+                    } };
+                } else if (self.color_scheme == .light)
+                    .{ .rgb = .{ 230, 230, 230 } }
+                else
+                    .{ .rgb = .{ 45, 45, 45 } };
+                    
+                const visual_bg: vaxis.Color = if (self.terminal_bg) |bg| blk: {
+                    // Shift towards blue for visual selection
+                    const shift: i16 = if (self.color_scheme == .light) -20 else 20;
+                    break :blk .{ .rgb = .{
+                        @intCast(std.math.clamp(@as(i16, bg[0]) + shift - 10, 0, 255)),
+                        @intCast(std.math.clamp(@as(i16, bg[1]) + shift, 0, 255)),
+                        @intCast(std.math.clamp(@as(i16, bg[2]) + shift + 20, 0, 255)),
+                    } };
+                } else if (self.color_scheme == .light)
+                    .{ .rgb = .{ 210, 220, 240 } }
+                else
+                    .{ .rgb = .{ 35, 45, 65 } };
+                    
+                const style: vaxis.Style = if (is_selected)
+                    .{ .bg = visual_bg }
+                else if (is_cursor)
+                    .{ .bg = cursor_bg }
+                else
+                    .{};
+
+                // Expand marked lines to wrap across multiple rows
+                if ((is_selected or is_cursor) and line.text.len > width) {
+                    var text_offset: usize = 0;
+                    while (text_offset < line.text.len and row < height - 1) {
+                        const remaining = line.text.len - text_offset;
+                        const chunk_len = @min(remaining, width);
+                        _ = win.printSegment(.{
+                            .text = line.text[text_offset .. text_offset + chunk_len],
+                            .style = style,
+                        }, .{ .col_offset = start_col, .row_offset = row });
+                        text_offset += chunk_len;
+                        row += 1;
+                    }
+                } else {
+                    const max_len = @min(line.text.len, width);
+                    _ = win.printSegment(.{
+                        .text = line.text[0..max_len],
+                        .style = style,
+                    }, .{ .col_offset = start_col, .row_offset = row });
+                    row += 1;
+                }
+            } else {
+                row += 1;
             }
-            row += 1;
         }
 
         // Show empty state
@@ -416,7 +512,12 @@ pub const App = struct {
             });
         }
 
-        const help = if (self.visual_mode) " v/Esc:exit visual  j/k:select  y:copy " else " q:quit j/k:nav r:restart x:kill g/G:top/end v:visual y:copy ";
+        const help = if (self.visual_mode)
+            " v/Esc:exit visual  j/k:select  y:copy "
+        else if (self.focus_on_logs)
+            " h/Esc:back  j/k:nav  v:visual  y:copy  g/G:top/end "
+        else
+            " q:quit  j/k:select  l/Enter:logs  r:restart  x:kill  v:visual  y:copy ";
         _ = win.printSegment(.{
             .text = help,
             .style = bar_style,
@@ -433,6 +534,21 @@ pub const App = struct {
                 .text = count_str,
                 .style = bar_style,
             }, .{ .col_offset = start, .row_offset = row });
+        }
+    }
+
+    fn ensureCursorVisible(self: *App) void {
+        const win = self.vx.window();
+        const visible_lines = win.height -| 3;
+        if (visible_lines == 0) return;
+
+        // Scroll up if cursor is above visible area
+        if (self.cursor_line < self.scroll_offset) {
+            self.scroll_offset = self.cursor_line;
+        }
+        // Scroll down if cursor is below visible area
+        else if (self.cursor_line >= self.scroll_offset + visible_lines) {
+            self.scroll_offset = self.cursor_line - visible_lines + 1;
         }
     }
 };
