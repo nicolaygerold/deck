@@ -502,9 +502,18 @@ pub const App = struct {
 
     fn drawStatusBar(self: *App, win: vaxis.Window, width: u16, height: u16) void {
         const row = height - 1;
-        const bar_style: vaxis.Style = .{ .reverse = true };
+        
+        // Theme-aware status bar colors
+        const bar_style: vaxis.Style = if (self.terminal_bg) |bg| blk: {
+            const shift: i16 = if (self.color_scheme == .light) -30 else 30;
+            break :blk .{ .bg = .{ .rgb = .{
+                @intCast(std.math.clamp(@as(i16, bg[0]) + shift, 0, 255)),
+                @intCast(std.math.clamp(@as(i16, bg[1]) + shift, 0, 255)),
+                @intCast(std.math.clamp(@as(i16, bg[2]) + shift, 0, 255)),
+            } } };
+        } else .{ .reverse = true };
 
-        // Fill background with reverse video
+        // Fill background
         for (0..width) |col| {
             win.writeCell(@intCast(col), row, .{
                 .char = .{ .grapheme = " ", .width = 1 },
