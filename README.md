@@ -66,3 +66,7 @@ cp zig-out/bin/deck ~/.local/bin/
 ## License
 
 MIT
+
+---
+
+Built entirely with [Amp](https://ampcode.com).
