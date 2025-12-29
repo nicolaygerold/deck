@@ -213,20 +213,37 @@ pub const App = struct {
                     self.auto_scroll = false;
                     return;
                 }
-                if (mouse.button == .left) {
+                if (mouse.button == .left and mouse.type == .press) {
+                    const win = self.vx.window();
+                    const sidebar_width: u16 = @min(25, win.width / 4);
+                    
+                    if (mouse.col < sidebar_width and mouse.row >= 2 and mouse.row < win.height - 1) {
+                        const clicked_idx = @as(usize, @intCast(mouse.row - 2));
+                        if (clicked_idx < self.manager.processes.len) {
+                            self.selected = clicked_idx;
+                            self.scroll_offset = 0;
+                            self.auto_scroll = true;
+                            self.visual_mode = false;
+                        }
+                    } else if (mouse.col > sidebar_width and mouse.row >= 2 and mouse.row < win.height - 1) {
+                        const clicked_line = self.scroll_offset + @as(usize, @intCast(mouse.row - 2));
+                        const log = &self.manager.processes[self.selected].log;
+                        if (clicked_line < log.lineCount()) {
+                            self.visual_mode = true;
+                            self.selection_anchor = clicked_line;
+                            self.cursor_line = clicked_line;
+                        }
+                    }
+                    return;
+                }
+                if (mouse.button == .left and mouse.type == .drag and self.visual_mode) {
                     const win = self.vx.window();
                     const sidebar_width: u16 = @min(25, win.width / 4);
                     if (mouse.col > sidebar_width and mouse.row >= 2 and mouse.row < win.height - 1) {
                         const clicked_line = self.scroll_offset + @as(usize, @intCast(mouse.row - 2));
                         const log = &self.manager.processes[self.selected].log;
                         if (clicked_line < log.lineCount()) {
-                            if (mouse.type == .press) {
-                                self.visual_mode = true;
-                                self.selection_anchor = clicked_line;
-                                self.cursor_line = clicked_line;
-                            } else if (mouse.type == .drag and self.visual_mode) {
-                                self.cursor_line = clicked_line;
-                            }
+                            self.cursor_line = clicked_line;
                         }
                     }
                     return;
