@@ -1,0 +1,17 @@
+.{
+    .name = .deck,
+    .version = "0.1.0",
+    .fingerprint = 0x4fac3637355d066a,
+    .minimum_zig_version = "0.14.0",
+    .dependencies = .{
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis#75035b169e91a51c233f3742161f8eb8eafca659",
+            .hash = "vaxis-0.5.1-BWNV_IE-CQBYmSf_boEKUyv6den0Gmj5LksxvdCx2pBL",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
