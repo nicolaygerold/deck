@@ -1,12 +1,11 @@
 .{
-    .name = .deck,
+    .name = "deck",
     .version = "0.1.0",
-    .fingerprint = 0x4fac3637355d066a,
-    .minimum_zig_version = "0.15.0",
+    .minimum_zig_version = "0.14.0",
     .dependencies = .{
         .vaxis = .{
-            .url = "git+https://github.com/rockorager/libvaxis#75035b169e91a51c233f3742161f8eb8eafca659",
-            .hash = "vaxis-0.5.1-BWNV_IE-CQBYmSf_boEKUyv6den0Gmj5LksxvdCx2pBL",
+            .url = "git+https://github.com/rockorager/libvaxis?ref=v0.5.1#2ab3b46e89bced844b60601c7ab9961420d15994",
+            .hash = "12204915b9c5200c7a1a4716f7ccf9c0a74c0a4f66b0e62a42fc48a50d89e16e2a7e",
         },
     },
     .paths = .{
