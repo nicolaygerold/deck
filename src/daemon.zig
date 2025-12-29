@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const native_os = builtin.os.tag;
 const Allocator = std.mem.Allocator;
 const cli = @import("cli.zig");
 const proc = @import("process.zig");
@@ -16,6 +17,14 @@ var stop_requested: bool = false;
 
 fn sigtermHandler(_: c_int) callconv(.c) void {
     stop_requested = true;
+}
+
+fn setsid() void {
+    if (native_os == .linux) {
+        _ = std.os.linux.syscall0(.setsid);
+    } else if (native_os == .macos) {
+        _ = std.c.setsid();
+    }
 }
 
 pub fn getDataDir(allocator: Allocator, session: ?[]const u8) ![]u8 {
@@ -68,7 +77,7 @@ pub fn start(allocator: Allocator, commands: []const cli.Command, session: ?[]co
         return;
     }
 
-    _ = std.posix.setsid() catch {};
+    setsid();
 
     const child_allocator = std.heap.page_allocator;
 
