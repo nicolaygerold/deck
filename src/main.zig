@@ -37,7 +37,11 @@ pub fn main() !void {
     defer args.deinit();
 
     var manager = try proc.ProcessManager.init(allocator, args.commands);
-    defer manager.deinit();
+    defer {
+        std.debug.print("\nCleaning up processes...\n", .{});
+        manager.deinit();
+        std.debug.print("All processes terminated\n", .{});
+    }
 
     try manager.spawnAll();
 
