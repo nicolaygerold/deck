@@ -46,7 +46,7 @@ wget -qO- https://raw.githubusercontent.com/nicolaygerold/deck/main/install.sh |
 
 ### From source
 
-Requires **Zig 0.14.0** (exact version).
+Requires **Zig 0.15.2**.
 
 ```bash
 zig build -Doptimize=ReleaseFast
@@ -56,7 +56,7 @@ cp zig-out/bin/deck ~/.local/bin/
 **Tip:** Use [anyzig](https://github.com/marler8997/anyzig) to automatically manage Zig versions:
 ```bash
 cargo install anyzig  # or: brew install anyzig
-anyzig build -Doptimize=ReleaseFast  # auto-downloads Zig 0.14.0
+anyzig build -Doptimize=ReleaseFast  # auto-downloads correct Zig version
 ```
 
 ## Screenshot
