@@ -430,7 +430,7 @@ pub const App = struct {
             if (log.getLine(line_idx)) |line| {
                 const is_selected = self.visual_mode and line_idx >= sel_start and line_idx <= sel_end;
                 const is_cursor = self.focus_on_logs and !self.visual_mode and line_idx == self.cursor_line;
-                
+
                 // Derive highlight colors from terminal's background
                 const cursor_bg: vaxis.Color = if (self.terminal_bg) |bg| blk: {
                     // Shift towards gray for cursor highlight
@@ -444,7 +444,7 @@ pub const App = struct {
                     .{ .rgb = .{ 230, 230, 230 } }
                 else
                     .{ .rgb = .{ 45, 45, 45 } };
-                    
+
                 const visual_bg: vaxis.Color = if (self.terminal_bg) |bg| blk: {
                     // Shift towards blue for visual selection
                     const shift: i16 = if (self.color_scheme == .light) -20 else 20;
@@ -457,7 +457,7 @@ pub const App = struct {
                     .{ .rgb = .{ 210, 220, 240 } }
                 else
                     .{ .rgb = .{ 35, 45, 65 } };
-                    
+
                 const style: vaxis.Style = if (is_selected)
                     .{ .bg = visual_bg }
                 else if (is_cursor)
@@ -502,7 +502,7 @@ pub const App = struct {
 
     fn drawStatusBar(self: *App, win: vaxis.Window, width: u16, height: u16) void {
         const row = height - 1;
-        
+
         // Theme-aware status bar colors
         const bar_style: vaxis.Style = if (self.terminal_bg) |bg| blk: {
             const shift: i16 = if (self.color_scheme == .light) -30 else 30;

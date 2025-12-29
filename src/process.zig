@@ -42,6 +42,7 @@ pub const Process = struct {
         );
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
+        child.pgid = 0; // Create new process group (child becomes leader)
 
         try child.spawn();
 
@@ -102,7 +103,10 @@ pub const Process = struct {
 
     pub fn kill(self: *Process) void {
         if (self.child) |*child| {
-            _ = child.kill() catch {};
+            // Kill the entire process group (negative PID)
+            const pid = child.id;
+            std.posix.kill(-@as(i32, @intCast(pid)), std.posix.SIG.TERM) catch {};
+            _ = child.wait() catch {};
             self.status = .exited;
             self.child = null;
         }
