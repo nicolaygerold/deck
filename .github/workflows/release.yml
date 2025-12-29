@@ -34,7 +34,6 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: master
-          mirror: https://ziglang.org/builds
 
       - name: Build
         run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
