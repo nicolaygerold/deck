@@ -6,12 +6,51 @@ Like `concurrently`, but with a TUI that lets you switch between process outputs
 
 ## Usage
 
+### Interactive TUI Mode
+
 ```bash
 # Run multiple commands
 deck "bun dev" "cargo watch" "make serve"
 
 # With custom names
 deck -n web,api,docs "bun dev" "cargo run" "make docs"
+```
+
+### Daemon Mode (AI-friendly)
+
+Run processes in the background without a TUI:
+
+```bash
+# Start processes as a daemon
+deck start -n web,api "bun dev" "cargo run"
+
+# View logs for a process
+deck logs web
+deck logs web --tail=50
+deck logs api --head=20
+
+# Stop all daemon processes
+deck stop
+```
+
+Logs are stored in `~/.local/share/deck/<session>/logs/` while running and cleaned up on stop.
+
+### Sessions
+
+By default, each working directory gets its own isolated session (based on path hash). This allows running multiple decks in parallel from different directories.
+
+```bash
+# Run deck in different directories - each gets its own session
+cd ~/project-a && deck start -n web,api "bun dev" "cargo run"
+cd ~/project-b && deck start -n client,server "npm run dev" "go run ."
+
+# Named sessions for multiple decks in the same directory
+deck start -s frontend -n web,api "bun dev" "fastify start"
+deck start -s backend -n db,cache "postgres" "redis-server"
+
+# Manage named sessions
+deck logs web -s frontend
+deck stop -s backend
 ```
 
 ## Keybindings
