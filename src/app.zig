@@ -216,7 +216,7 @@ pub const App = struct {
                 if (mouse.button == .left and mouse.type == .press) {
                     const win = self.vx.window();
                     const sidebar_width: u16 = @min(25, win.width / 4);
-                    
+
                     if (mouse.col < sidebar_width and mouse.row >= 2 and mouse.row < win.height - 1) {
                         const clicked_idx = @as(usize, @intCast(mouse.row - 2));
                         if (clicked_idx < self.manager.processes.len) {
