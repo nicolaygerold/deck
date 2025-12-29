@@ -33,17 +33,20 @@ deck -n web,api,docs "bun dev" "cargo run" "make docs"
 | `Ctrl+U` / `PgUp` | Page up |
 | Mouse wheel | Scroll logs |
 
-## Building
-
-Requires Zig 0.15+.
+## Install
 
 ```bash
-zig build           # Build
-zig build run -- "cmd1" "cmd2"  # Run
-zig build test      # Test
+curl -fsSL https://raw.githubusercontent.com/nicolaygerold/deck/main/install.sh | sh
 ```
 
-## Install
+Or with wget:
+```bash
+wget -qO- https://raw.githubusercontent.com/nicolaygerold/deck/main/install.sh | sh
+```
+
+### From source
+
+Requires Zig 0.14+.
 
 ```bash
 zig build -Doptimize=ReleaseFast

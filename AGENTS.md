@@ -9,6 +9,17 @@
 - `just check-all` - Check format and run tests
 - `just check-fix` - Fix format and run tests
 
+## Releasing
+
+To create a new release, tag and push:
+
+```bash
+git tag v<version>
+git push --tags
+```
+
+This triggers GitHub Actions to build binaries for all platforms and create a release.
+
 ## Project
 
 **deck** - A terminal dashboard for running multiple dev processes with switchable logs.
