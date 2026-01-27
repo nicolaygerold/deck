@@ -444,7 +444,7 @@ const LogEntry = struct {
     order: usize,
 };
 
-fn matchesFilters(line: []const u8, opts: LogOptions) bool {
+pub fn matchesFilters(line: []const u8, opts: LogOptions) bool {
     if (opts.level) |min_level| {
         const line_level = detectLevel(line) orelse return false;
         if (line_level.order() < min_level.order()) return false;
@@ -457,7 +457,7 @@ fn matchesFilters(line: []const u8, opts: LogOptions) bool {
     return true;
 }
 
-fn detectLevel(line: []const u8) ?cli.LogLevel {
+pub fn detectLevel(line: []const u8) ?cli.LogLevel {
     const check_len = @min(line.len, 100);
 
     if (containsIgnoreCaseInRange(line, 0, check_len, "error") or
@@ -504,7 +504,7 @@ fn containsIgnoreCaseInRange(haystack: []const u8, range_start: usize, range_end
     return false;
 }
 
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+pub fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
     if (needle.len > haystack.len) return false;
 
@@ -756,4 +756,116 @@ pub fn clear(allocator: Allocator, name: ?[]const u8, session: ?[]const u8) !voi
         }
         std.debug.print("Cleared logs for {d} process(es)\n", .{count});
     }
+}
+
+test "RingBuffer push and iterate" {
+    var ring = RingBuffer.init(std.testing.allocator);
+    defer ring.deinit();
+
+    try ring.push("line1");
+    try ring.push("line2");
+    try ring.push("line3");
+    try ring.push("line4");
+    try ring.push("line5");
+
+    var iter = ring.iterate(10);
+    try std.testing.expectEqualStrings("line1", iter.next().?);
+    try std.testing.expectEqualStrings("line2", iter.next().?);
+    try std.testing.expectEqualStrings("line3", iter.next().?);
+    try std.testing.expectEqualStrings("line4", iter.next().?);
+    try std.testing.expectEqualStrings("line5", iter.next().?);
+    try std.testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "RingBuffer respects limit on iterate" {
+    var ring = RingBuffer.init(std.testing.allocator);
+    defer ring.deinit();
+
+    for (0..10) |i| {
+        var buf: [16]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "line{d}", .{i}) catch unreachable;
+        try ring.push(line);
+    }
+
+    var iter = ring.iterate(5);
+    try std.testing.expectEqualStrings("line5", iter.next().?);
+    try std.testing.expectEqualStrings("line6", iter.next().?);
+    try std.testing.expectEqualStrings("line7", iter.next().?);
+    try std.testing.expectEqualStrings("line8", iter.next().?);
+    try std.testing.expectEqualStrings("line9", iter.next().?);
+    try std.testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "RingBuffer wraps around at MAX_LINES" {
+    var ring = RingBuffer.init(std.testing.allocator);
+    defer ring.deinit();
+
+    for (0..1005) |i| {
+        var buf: [16]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "line{d}", .{i}) catch unreachable;
+        try ring.push(line);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1000), ring.len);
+
+    var iter = ring.iterate(1000);
+    try std.testing.expectEqualStrings("line5", iter.next().?);
+
+    for (6..1005) |_| {
+        _ = iter.next();
+    }
+    try std.testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "RingBuffer deinit frees all memory" {
+    var ring = RingBuffer.init(std.testing.allocator);
+
+    try ring.push("line1");
+    try ring.push("line2");
+    try ring.push("line3");
+
+    ring.deinit();
+}
+
+test "LogEntryRing stores process name with line" {
+    var ring = LogEntryRing.init(std.testing.allocator);
+    defer ring.deinit();
+
+    try ring.push("log message 1", "process_a", 0);
+    try ring.push("log message 2", "process_b", 1);
+    try ring.push("log message 3", "process_a", 2);
+
+    var iter = ring.iterate(10);
+
+    const entry1 = iter.next().?;
+    try std.testing.expectEqualStrings("log message 1", entry1.line);
+    try std.testing.expectEqualStrings("process_a", entry1.process);
+
+    const entry2 = iter.next().?;
+    try std.testing.expectEqualStrings("log message 2", entry2.line);
+    try std.testing.expectEqualStrings("process_b", entry2.process);
+
+    const entry3 = iter.next().?;
+    try std.testing.expectEqualStrings("log message 3", entry3.line);
+    try std.testing.expectEqualStrings("process_a", entry3.process);
+
+    try std.testing.expectEqual(@as(?LogEntryRing.Entry, null), iter.next());
+}
+
+test "LogEntryRing iterate returns correct count" {
+    var ring = LogEntryRing.init(std.testing.allocator);
+    defer ring.deinit();
+
+    for (0..20) |i| {
+        var buf: [16]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "line{d}", .{i}) catch unreachable;
+        try ring.push(line, "proc", i);
+    }
+
+    var iter = ring.iterate(10);
+    var count: usize = 0;
+    while (iter.next()) |_| {
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 10), count);
 }

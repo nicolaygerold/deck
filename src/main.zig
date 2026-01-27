@@ -111,6 +111,8 @@ fn runTui(allocator: std.mem.Allocator, commands: []const cli.Command) !void {
 test {
     _ = @import("buffer_test.zig");
     _ = @import("cli_test.zig");
+    _ = @import("daemon_test.zig");
+    _ = @import("integration_test.zig");
     _ = @import("process_test.zig");
     _ = @import("ui_test.zig");
 }
