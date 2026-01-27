@@ -30,7 +30,7 @@ pub fn main() !void {
                 cli.printUsage();
             },
             cli.ParseError.MissingLogName => {
-                std.debug.print("Error: logs command requires a process name\n\n", .{});
+                std.debug.print("Error: logs command requires a process name (or use --all)\n\n", .{});
                 cli.printUsage();
             },
             cli.ParseError.MissingSessionValue => {
@@ -42,6 +42,9 @@ pub fn main() !void {
             },
             cli.ParseError.InvalidTailValue => {
                 std.debug.print("Error: --tail requires a valid number\n\n", .{});
+            },
+            cli.ParseError.InvalidLevelValue => {
+                std.debug.print("Error: --level requires a valid level (debug, info, warn, error)\n\n", .{});
             },
             cli.ParseError.OutOfMemory => {
                 std.debug.print("Error: out of memory\n", .{});
@@ -63,11 +66,25 @@ pub fn main() !void {
             std.debug.print("Failed to stop daemon: {}\n", .{err});
             std.process.exit(1);
         },
-        .logs => daemon.logs(allocator, args.log_name.?, args.head, args.tail, args.session) catch |err| {
+        .logs => daemon.logs(allocator, .{
+            .name = args.log_name,
+            .head = args.head,
+            .tail = args.tail,
+            .session = args.session,
+            .grep = args.grep,
+            .level = args.level,
+            .follow = args.follow,
+            .all = args.all,
+            .json = args.json,
+        }) catch |err| {
             if (err != error.LogNotFound) {
                 std.debug.print("Failed to read logs: {}\n", .{err});
                 std.process.exit(1);
             }
+        },
+        .clear => daemon.clear(allocator, args.log_name, args.session) catch |err| {
+            std.debug.print("Failed to clear logs: {}\n", .{err});
+            std.process.exit(1);
         },
     }
 }

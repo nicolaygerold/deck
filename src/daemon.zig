@@ -11,6 +11,7 @@ const DaemonError = error{
     ForkFailed,
     InvalidPid,
     LogNotFound,
+    NoLogsDirectory,
 } || std.fs.File.OpenError || std.posix.OpenError || Allocator.Error || std.posix.ReadError;
 
 var stop_requested: bool = false;
@@ -262,8 +263,20 @@ pub fn stop(allocator: Allocator, session: ?[]const u8) !void {
     std.debug.print("Stopped deck daemon (pid {d})\n", .{pid});
 }
 
-pub fn logs(allocator: Allocator, name: []const u8, head: ?usize, tail: ?usize, session: ?[]const u8) !void {
-    const data_dir = try getDataDir(allocator, session);
+pub const LogOptions = struct {
+    name: ?[]const u8,
+    head: ?usize,
+    tail: ?usize,
+    session: ?[]const u8,
+    grep: ?[]const u8,
+    level: ?cli.LogLevel,
+    follow: bool,
+    all: bool,
+    json: bool,
+};
+
+pub fn logs(allocator: Allocator, opts: LogOptions) !void {
+    const data_dir = try getDataDir(allocator, opts.session);
     defer allocator.free(data_dir);
 
     var dir = std.fs.cwd().openDir(data_dir, .{}) catch {
@@ -278,6 +291,14 @@ pub fn logs(allocator: Allocator, name: []const u8, head: ?usize, tail: ?usize, 
     };
     defer logs_dir.close();
 
+    if (opts.all) {
+        try logsAll(allocator, logs_dir, opts);
+    } else if (opts.name) |name| {
+        try logsSingle(allocator, logs_dir, name, opts);
+    }
+}
+
+fn logsSingle(allocator: Allocator, logs_dir: std.fs.Dir, name: []const u8, opts: LogOptions) !void {
     const sanitized = try cli.sanitizeName(allocator, name);
     defer allocator.free(sanitized);
 
@@ -290,65 +311,449 @@ pub fn logs(allocator: Allocator, name: []const u8, head: ?usize, tail: ?usize, 
     };
     defer file.close();
 
-    if (head) |n| {
-        try printHead(allocator, file, n);
-    } else if (tail) |n| {
-        try printTail(allocator, file, n);
+    if (opts.follow) {
+        try followLog(allocator, file, name, opts);
+    } else if (opts.head) |n| {
+        try printFiltered(allocator, file, name, n, true, opts);
+    } else if (opts.tail) |n| {
+        try printFiltered(allocator, file, name, n, false, opts);
     } else {
-        try printAll(file);
+        try printFiltered(allocator, file, name, null, false, opts);
     }
 }
 
-fn printHead(allocator: Allocator, file: std.fs.File, n: usize) !void {
-    const stat = try file.stat();
-    const size = stat.size;
-    if (size == 0) return;
+fn logsAll(allocator: Allocator, logs_dir: std.fs.Dir, opts: LogOptions) !void {
+    const limit = opts.tail orelse opts.head orelse 100;
 
-    const content = try allocator.alloc(u8, @intCast(size));
-    defer allocator.free(content);
-    _ = try file.readAll(content);
+    var ring = LogEntryRing.init(allocator);
+    defer ring.deinit();
 
-    var line_count: usize = 0;
-    var iter = std.mem.splitScalar(u8, content, '\n');
-    while (iter.next()) |line| {
-        if (line_count >= n) break;
-        _ = std.posix.write(std.posix.STDOUT_FILENO, line) catch break;
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch break;
-        line_count += 1;
-    }
-}
+    var dir_iter = logs_dir.iterate();
+    while (try dir_iter.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".log")) continue;
 
-fn printTail(allocator: Allocator, file: std.fs.File, n: usize) !void {
-    const stat = try file.stat();
-    const size = stat.size;
-    if (size == 0) return;
+        const process_name = entry.name[0 .. entry.name.len - 4];
+        var file = logs_dir.openFile(entry.name, .{}) catch continue;
+        defer file.close();
 
-    const buf = try allocator.alloc(u8, @intCast(size));
-    defer allocator.free(buf);
-    _ = try file.readAll(buf);
+        var read_buf: [8192]u8 = undefined;
+        var reader = file.reader(&read_buf);
+        var line_num: usize = 0;
 
-    var lines = std.ArrayListUnmanaged([]const u8){};
-    defer lines.deinit(allocator);
+        while (true) {
+            const line = reader.interface.takeDelimiterExclusive('\n') catch |err| {
+                if (err == error.StreamTooLong) {
+                    _ = reader.interface.discardDelimiterExclusive('\n') catch break;
+                    continue;
+                }
+                break;
+            };
 
-    var iter = std.mem.splitScalar(u8, buf, '\n');
-    while (iter.next()) |line| {
-        if (line.len > 0 or iter.peek() != null) {
-            lines.append(allocator, line) catch {};
+            if (line.len == 0) continue;
+            if (!matchesFilters(line, opts)) continue;
+
+            try ring.push(line, process_name, line_num);
+            line_num += 1;
         }
     }
 
-    const start_idx = if (lines.items.len > n) lines.items.len - n else 0;
-    for (lines.items[start_idx..]) |line| {
-        _ = std.posix.write(std.posix.STDOUT_FILENO, line) catch break;
-        _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch break;
+    var iter = ring.iterate(limit);
+    while (iter.next()) |e| {
+        if (opts.json) {
+            printJsonLine(e.process, e.line);
+        } else {
+            std.debug.print("[{s}] {s}\n", .{ e.process, e.line });
+        }
     }
 }
 
-fn printAll(file: std.fs.File) !void {
-    var buf: [4096]u8 = undefined;
+const LogEntryRing = struct {
+    const MAX_LINES = 1000;
+
+    const Entry = struct {
+        line: []u8,
+        process: []u8,
+        order: usize,
+    };
+
+    entries: [MAX_LINES]Entry = undefined,
+    head: usize = 0,
+    len: usize = 0,
+    allocator: Allocator,
+
+    fn init(alloc: Allocator) LogEntryRing {
+        return .{ .allocator = alloc };
+    }
+
+    fn deinit(self: *LogEntryRing) void {
+        const count = @min(self.len, MAX_LINES);
+        for (0..count) |i| {
+            const idx = (self.head + i) % MAX_LINES;
+            self.allocator.free(self.entries[idx].line);
+            self.allocator.free(self.entries[idx].process);
+        }
+    }
+
+    fn push(self: *LogEntryRing, line: []const u8, process: []const u8, order: usize) !void {
+        const idx = (self.head + self.len) % MAX_LINES;
+
+        if (self.len == MAX_LINES) {
+            self.allocator.free(self.entries[self.head].line);
+            self.allocator.free(self.entries[self.head].process);
+            self.head = (self.head + 1) % MAX_LINES;
+        } else {
+            self.len += 1;
+        }
+
+        self.entries[idx] = .{
+            .line = try self.allocator.dupe(u8, line),
+            .process = try self.allocator.dupe(u8, process),
+            .order = order,
+        };
+    }
+
+    fn iterate(self: *const LogEntryRing, n: usize) Iterator {
+        const count = @min(n, self.len);
+        const start_offset = self.len - count;
+        return .{
+            .ring = self,
+            .remaining = count,
+            .pos = (self.head + start_offset) % MAX_LINES,
+        };
+    }
+
+    const Iterator = struct {
+        ring: *const LogEntryRing,
+        remaining: usize,
+        pos: usize,
+
+        fn next(self: *Iterator) ?Entry {
+            if (self.remaining == 0) return null;
+            const entry = self.ring.entries[self.pos];
+            self.pos = (self.pos + 1) % MAX_LINES;
+            self.remaining -= 1;
+            return entry;
+        }
+    };
+};
+
+const LogEntry = struct {
+    line: []const u8,
+    process: []const u8,
+    order: usize,
+};
+
+fn matchesFilters(line: []const u8, opts: LogOptions) bool {
+    if (opts.level) |min_level| {
+        const line_level = detectLevel(line) orelse return false;
+        if (line_level.order() < min_level.order()) return false;
+    }
+
+    if (opts.grep) |pattern| {
+        if (!containsIgnoreCase(line, pattern)) return false;
+    }
+
+    return true;
+}
+
+fn detectLevel(line: []const u8) ?cli.LogLevel {
+    const check_len = @min(line.len, 100);
+
+    if (containsIgnoreCaseInRange(line, 0, check_len, "error") or
+        containsIgnoreCaseInRange(line, 0, check_len, "[err]") or
+        containsIgnoreCaseInRange(line, 0, check_len, " err "))
+    {
+        return .@"error";
+    }
+    if (containsIgnoreCaseInRange(line, 0, check_len, "warn") or
+        containsIgnoreCaseInRange(line, 0, check_len, "[wrn]"))
+    {
+        return .warning;
+    }
+    if (containsIgnoreCaseInRange(line, 0, check_len, "info") or
+        containsIgnoreCaseInRange(line, 0, check_len, "[inf]"))
+    {
+        return .info;
+    }
+    if (containsIgnoreCaseInRange(line, 0, check_len, "debug") or
+        containsIgnoreCaseInRange(line, 0, check_len, "[dbg]"))
+    {
+        return .debug;
+    }
+
+    return .info;
+}
+
+fn containsIgnoreCaseInRange(haystack: []const u8, range_start: usize, range_end: usize, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    const actual_end = @min(range_end, haystack.len);
+    if (range_start >= actual_end or needle.len > actual_end - range_start) return false;
+
+    var i: usize = range_start;
+    while (i + needle.len <= actual_end) : (i += 1) {
+        var matches = true;
+        for (needle, 0..) |nc, j| {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(nc)) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches) return true;
+    }
+    return false;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        var matches = true;
+        for (needle, 0..) |nc, j| {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(nc)) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches) return true;
+    }
+    return false;
+}
+
+fn printFiltered(allocator: Allocator, file: std.fs.File, process: []const u8, limit: ?usize, from_head: bool, opts: LogOptions) !void {
+    if (from_head) {
+        try printHead(file, process, limit orelse std.math.maxInt(usize), opts);
+    } else {
+        try printTailFiltered(allocator, file, process, limit orelse 100, opts);
+    }
+}
+
+fn printHead(file: std.fs.File, process: []const u8, limit: usize, opts: LogOptions) !void {
+    var read_buf: [8192]u8 = undefined;
+    var reader = file.reader(&read_buf);
+    var printed: usize = 0;
+
+    while (printed < limit) {
+        const line = reader.interface.takeDelimiterExclusive('\n') catch |err| {
+            if (err == error.StreamTooLong) {
+                _ = reader.interface.discardDelimiterExclusive('\n') catch break;
+                continue;
+            }
+            break;
+        };
+
+        if (!matchesFilters(line, opts)) continue;
+
+        if (opts.json) {
+            printJsonLine(process, line);
+        } else {
+            _ = std.posix.write(std.posix.STDOUT_FILENO, line) catch break;
+            _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch break;
+        }
+        printed += 1;
+    }
+}
+
+const RingBuffer = struct {
+    const MAX_LINES = 1000;
+
+    lines: [MAX_LINES][]u8 = undefined,
+    head: usize = 0,
+    len: usize = 0,
+    allocator: Allocator,
+
+    fn init(alloc: Allocator) RingBuffer {
+        return .{ .allocator = alloc };
+    }
+
+    fn deinit(self: *RingBuffer) void {
+        const count = @min(self.len, MAX_LINES);
+        for (0..count) |i| {
+            const idx = (self.head + i) % MAX_LINES;
+            self.allocator.free(self.lines[idx]);
+        }
+    }
+
+    fn push(self: *RingBuffer, line: []const u8) !void {
+        const idx = (self.head + self.len) % MAX_LINES;
+
+        if (self.len == MAX_LINES) {
+            self.allocator.free(self.lines[self.head]);
+            self.head = (self.head + 1) % MAX_LINES;
+        } else {
+            self.len += 1;
+        }
+
+        self.lines[idx] = try self.allocator.dupe(u8, line);
+    }
+
+    fn getLastN(self: *const RingBuffer, n: usize) []const []u8 {
+        const count = @min(n, self.len);
+        const start_offset = self.len - count;
+        return self.lines[(self.head + start_offset) % MAX_LINES ..][0..count];
+    }
+
+    fn iterate(self: *const RingBuffer, n: usize) Iterator {
+        const count = @min(n, self.len);
+        const start_offset = self.len - count;
+        return .{
+            .ring = self,
+            .remaining = count,
+            .pos = (self.head + start_offset) % MAX_LINES,
+        };
+    }
+
+    const Iterator = struct {
+        ring: *const RingBuffer,
+        remaining: usize,
+        pos: usize,
+
+        fn next(self: *Iterator) ?[]const u8 {
+            if (self.remaining == 0) return null;
+            const line = self.ring.lines[self.pos];
+            self.pos = (self.pos + 1) % MAX_LINES;
+            self.remaining -= 1;
+            return line;
+        }
+    };
+};
+
+fn printTailFiltered(allocator: Allocator, file: std.fs.File, process: []const u8, limit: usize, opts: LogOptions) !void {
+    var ring = RingBuffer.init(allocator);
+    defer ring.deinit();
+
+    var read_buf: [8192]u8 = undefined;
+    var reader = file.reader(&read_buf);
+
     while (true) {
-        const n = try file.read(&buf);
-        if (n == 0) break;
-        _ = std.posix.write(std.posix.STDOUT_FILENO, buf[0..n]) catch break;
+        const line = reader.interface.takeDelimiterExclusive('\n') catch |err| {
+            if (err == error.StreamTooLong) {
+                _ = reader.interface.discardDelimiterExclusive('\n') catch break;
+                continue;
+            }
+            break;
+        };
+
+        if (!matchesFilters(line, opts)) continue;
+        try ring.push(line);
+    }
+
+    var iter = ring.iterate(limit);
+    while (iter.next()) |line| {
+        if (opts.json) {
+            printJsonLine(process, line);
+        } else {
+            _ = std.posix.write(std.posix.STDOUT_FILENO, line) catch break;
+            _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch break;
+        }
+    }
+}
+
+fn printJsonLine(process: []const u8, line: []const u8) void {
+    const level = detectLevel(line) orelse .info;
+    const level_str = switch (level) {
+        .debug => "debug",
+        .info => "info",
+        .warning => "warning",
+        .@"error" => "error",
+    };
+
+    std.debug.print("{{\"process\":\"{s}\",\"level\":\"{s}\",\"message\":\"", .{ process, level_str });
+    for (line) |c| {
+        switch (c) {
+            '"' => std.debug.print("\\\"", .{}),
+            '\\' => std.debug.print("\\\\", .{}),
+            '\n' => std.debug.print("\\n", .{}),
+            '\r' => std.debug.print("\\r", .{}),
+            '\t' => std.debug.print("\\t", .{}),
+            else => std.debug.print("{c}", .{c}),
+        }
+    }
+    std.debug.print("\"}}\n", .{});
+}
+
+fn followLog(allocator: Allocator, file: std.fs.File, process: []const u8, opts: LogOptions) !void {
+    _ = allocator;
+
+    var last_size: u64 = 0;
+    const stat = try file.stat();
+    last_size = stat.size;
+
+    try file.seekTo(last_size);
+
+    while (true) {
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+
+        const new_stat = try file.stat();
+        if (new_stat.size > last_size) {
+            var buf: [4096]u8 = undefined;
+            while (true) {
+                const n = try file.read(&buf);
+                if (n == 0) break;
+
+                var line_start: usize = 0;
+                for (buf[0..n], 0..) |c, i| {
+                    if (c == '\n') {
+                        const line = buf[line_start..i];
+                        if (matchesFilters(line, opts)) {
+                            if (opts.json) {
+                                printJsonLine(process, line);
+                            } else {
+                                _ = std.posix.write(std.posix.STDOUT_FILENO, line) catch {};
+                                _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+                            }
+                        }
+                        line_start = i + 1;
+                    }
+                }
+            }
+            last_size = new_stat.size;
+        }
+    }
+}
+
+pub fn clear(allocator: Allocator, name: ?[]const u8, session: ?[]const u8) !void {
+    const data_dir = try getDataDir(allocator, session);
+    defer allocator.free(data_dir);
+
+    var dir = std.fs.cwd().openDir(data_dir, .{}) catch {
+        std.debug.print("No deck session found\n", .{});
+        return;
+    };
+    defer dir.close();
+
+    var logs_dir = dir.openDir("logs", .{}) catch {
+        std.debug.print("No deck logs found\n", .{});
+        return;
+    };
+    defer logs_dir.close();
+
+    if (name) |n| {
+        const sanitized = try cli.sanitizeName(allocator, n);
+        defer allocator.free(sanitized);
+
+        const filename = try std.fmt.allocPrint(allocator, "{s}.log", .{sanitized});
+        defer allocator.free(filename);
+
+        var file = logs_dir.createFile(filename, .{ .truncate = true }) catch {
+            std.debug.print("No logs found for process '{s}'\n", .{n});
+            return;
+        };
+        file.close();
+        std.debug.print("Cleared logs for '{s}'\n", .{n});
+    } else {
+        var dir_iter = logs_dir.iterate();
+        var count: usize = 0;
+        while (try dir_iter.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".log")) continue;
+
+            var file = logs_dir.createFile(entry.name, .{ .truncate = true }) catch continue;
+            file.close();
+            count += 1;
+        }
+        std.debug.print("Cleared logs for {d} process(es)\n", .{count});
     }
 }

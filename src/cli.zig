@@ -11,6 +11,37 @@ pub const Mode = enum {
     start,
     stop,
     logs,
+    clear,
+};
+
+pub const LogLevel = enum {
+    debug,
+    info,
+    warning,
+    @"error",
+
+    pub fn fromString(s: []const u8) ?LogLevel {
+        var buf: [16]u8 = undefined;
+        const len = @min(s.len, 16);
+        for (s[0..len], 0..) |c, i| {
+            buf[i] = std.ascii.toLower(c);
+        }
+        const lower = buf[0..len];
+        if (std.mem.startsWith(u8, lower, "debug")) return .debug;
+        if (std.mem.startsWith(u8, lower, "info")) return .info;
+        if (std.mem.startsWith(u8, lower, "warn")) return .warning;
+        if (std.mem.startsWith(u8, lower, "error") or std.mem.startsWith(u8, lower, "err")) return .@"error";
+        return null;
+    }
+
+    pub fn order(self: LogLevel) u8 {
+        return switch (self) {
+            .debug => 0,
+            .info => 1,
+            .warning => 2,
+            .@"error" => 3,
+        };
+    }
 };
 
 pub const ParseError = error{
@@ -22,6 +53,7 @@ pub const ParseError = error{
     OutOfMemory,
     InvalidHeadValue,
     InvalidTailValue,
+    InvalidLevelValue,
 };
 
 pub const Args = struct {
@@ -31,6 +63,11 @@ pub const Args = struct {
     head: ?usize,
     tail: ?usize,
     session: ?[]const u8,
+    grep: ?[]const u8,
+    level: ?LogLevel,
+    follow: bool,
+    all: bool,
+    json: bool,
     allocator: Allocator,
 
     pub fn deinit(self: *Args) void {
@@ -51,6 +88,8 @@ pub fn parse(allocator: Allocator, argv: []const []const u8) ParseError!Args {
         return parseStop(allocator, argv[2..]);
     } else if (std.mem.eql(u8, first_arg, "logs")) {
         return parseLogs(allocator, argv[2..]);
+    } else if (std.mem.eql(u8, first_arg, "clear")) {
+        return parseClear(allocator, argv[2..]);
     } else {
         return parseTui(allocator, argv);
     }
@@ -94,6 +133,11 @@ fn parseStart(allocator: Allocator, argv: []const []const u8) ParseError!Args {
         .head = null,
         .tail = null,
         .session = session,
+        .grep = null,
+        .level = null,
+        .follow = false,
+        .all = false,
+        .json = false,
         .allocator = allocator,
     };
 }
@@ -119,19 +163,58 @@ fn parseStop(allocator: Allocator, argv: []const []const u8) ParseError!Args {
         .head = null,
         .tail = null,
         .session = session,
+        .grep = null,
+        .level = null,
+        .follow = false,
+        .all = false,
+        .json = false,
+        .allocator = allocator,
+    };
+}
+
+fn parseClear(allocator: Allocator, argv: []const []const u8) ParseError!Args {
+    var session: ?[]const u8 = null;
+    var log_name: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+
+        if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--session")) {
+            i += 1;
+            if (i >= argv.len) return ParseError.MissingSessionValue;
+            session = argv[i];
+        } else if (arg.len > 0 and arg[0] != '-') {
+            log_name = arg;
+        }
+    }
+
+    return .{
+        .mode = .clear,
+        .commands = &[_]Command{},
+        .log_name = log_name,
+        .head = null,
+        .tail = null,
+        .session = session,
+        .grep = null,
+        .level = null,
+        .follow = false,
+        .all = false,
+        .json = false,
         .allocator = allocator,
     };
 }
 
 fn parseLogs(allocator: Allocator, argv: []const []const u8) ParseError!Args {
-    if (argv.len == 0) {
-        return ParseError.MissingLogName;
-    }
-
     var log_name: ?[]const u8 = null;
     var head: ?usize = null;
     var tail: ?usize = null;
     var session: ?[]const u8 = null;
+    var grep: ?[]const u8 = null;
+    var level: ?LogLevel = null;
+    var follow: bool = false;
+    var all: bool = false;
+    var json: bool = false;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -143,6 +226,11 @@ fn parseLogs(allocator: Allocator, argv: []const []const u8) ParseError!Args {
         } else if (std.mem.startsWith(u8, arg, "--tail=")) {
             const val = arg["--tail=".len..];
             tail = std.fmt.parseInt(usize, val, 10) catch return ParseError.InvalidTailValue;
+        } else if (std.mem.startsWith(u8, arg, "--grep=")) {
+            grep = arg["--grep=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--level=")) {
+            const val = arg["--level=".len..];
+            level = LogLevel.fromString(val) orelse return ParseError.InvalidLevelValue;
         } else if (std.mem.eql(u8, arg, "--head")) {
             i += 1;
             if (i >= argv.len) return ParseError.InvalidHeadValue;
@@ -151,16 +239,30 @@ fn parseLogs(allocator: Allocator, argv: []const []const u8) ParseError!Args {
             i += 1;
             if (i >= argv.len) return ParseError.InvalidTailValue;
             tail = std.fmt.parseInt(usize, argv[i], 10) catch return ParseError.InvalidTailValue;
+        } else if (std.mem.eql(u8, arg, "--grep")) {
+            i += 1;
+            if (i >= argv.len) return ParseError.OutOfMemory;
+            grep = argv[i];
+        } else if (std.mem.eql(u8, arg, "--level")) {
+            i += 1;
+            if (i >= argv.len) return ParseError.InvalidLevelValue;
+            level = LogLevel.fromString(argv[i]) orelse return ParseError.InvalidLevelValue;
         } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--session")) {
             i += 1;
             if (i >= argv.len) return ParseError.MissingSessionValue;
             session = argv[i];
+        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--follow")) {
+            follow = true;
+        } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--all")) {
+            all = true;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
         } else if (arg.len > 0 and arg[0] != '-') {
             log_name = arg;
         }
     }
 
-    if (log_name == null) {
+    if (log_name == null and !all) {
         return ParseError.MissingLogName;
     }
 
@@ -169,8 +271,13 @@ fn parseLogs(allocator: Allocator, argv: []const []const u8) ParseError!Args {
         .commands = &[_]Command{},
         .log_name = log_name,
         .head = head,
-        .tail = if (head == null and tail == null) 100 else tail,
+        .tail = if (head == null and tail == null and !follow) 100 else tail,
         .session = session,
+        .grep = grep,
+        .level = level,
+        .follow = follow,
+        .all = all,
+        .json = json,
         .allocator = allocator,
     };
 }
@@ -213,6 +320,11 @@ fn parseTui(allocator: Allocator, argv: []const []const u8) ParseError!Args {
         .head = null,
         .tail = null,
         .session = session,
+        .grep = null,
+        .level = null,
+        .follow = false,
+        .all = false,
+        .json = false,
         .allocator = allocator,
     };
 }
@@ -273,6 +385,7 @@ pub fn printUsage() void {
         \\  start        Start processes in background (daemon mode)
         \\  stop         Stop the background daemon
         \\  logs <name>  View logs for a process
+        \\  clear [name] Clear logs (all or specific process)
         \\
         \\TUI Mode:
         \\  deck [OPTIONS] "cmd1" "cmd2" ...
@@ -284,7 +397,20 @@ pub fn printUsage() void {
         \\  deck stop [OPTIONS]
         \\
         \\Logs Mode:
-        \\  deck logs <name> [--head=N] [--tail=N] [OPTIONS]
+        \\  deck logs <name> [OPTIONS]
+        \\  deck logs --all [OPTIONS]
+        \\
+        \\Logs Options:
+        \\  --head=N           Show first N lines
+        \\  --tail=N           Show last N lines (default: 100)
+        \\  --grep=PATTERN     Filter lines matching pattern (case-insensitive)
+        \\  --level=LEVEL      Filter by log level (debug, info, warn, error)
+        \\  -f, --follow       Follow log output (like tail -f)
+        \\  -a, --all          Show logs from all processes (interleaved)
+        \\  --json             Output in JSON format
+        \\
+        \\Clear Mode:
+        \\  deck clear [name]  Clear logs for a process or all processes
         \\
         \\Options:
         \\  -n, --names NAME1,NAME2,...  Set custom names for processes
@@ -298,10 +424,13 @@ pub fn printUsage() void {
         \\Examples:
         \\  deck "bun dev" "cargo watch"                     # TUI mode
         \\  deck start -n web,api "bun dev" "cargo run"      # daemon
-        \\  deck start -s myapp -n web,api "bun dev" "go run ."  # named session
         \\  deck logs web --tail=50                          # last 50 lines
+        \\  deck logs web --grep="error|warn"                # filter by pattern
+        \\  deck logs web --level=error                      # only errors
+        \\  deck logs web -f                                 # follow mode
+        \\  deck logs --all --json                           # all logs as JSON
+        \\  deck clear web                                   # clear web logs
         \\  deck stop                                        # stop daemon
-        \\  deck stop -s myapp                               # stop named session
         \\
     , .{});
 }

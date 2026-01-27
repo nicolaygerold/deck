@@ -29,11 +29,34 @@ deck logs web
 deck logs web --tail=50
 deck logs api --head=20
 
+# Filter logs by pattern or level
+deck logs web --grep="error|warn"
+deck logs web --level=error
+
+# Follow logs in real-time
+deck logs web -f
+
+# View all process logs interleaved
+deck logs --all
+deck logs --all --json
+
+# Clear logs before running a specific action
+deck clear web
+deck clear  # clears all
+
 # Stop all daemon processes
 deck stop
 ```
 
 Logs are stored in `~/.local/share/deck/<session>/logs/` while running and cleaned up on stop.
+
+#### AI Workflow Pattern
+
+Clear logs before running a command to isolate its output:
+
+```bash
+deck clear web && curl localhost:3000/api/test && deck logs web --level=error
+```
 
 ### Sessions
 
