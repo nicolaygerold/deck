@@ -95,6 +95,14 @@ deck stop -s backend
 | `Ctrl+U` / `PgUp` | Page up |
 | Mouse wheel | Scroll logs |
 
+### Unicode vs ASCII
+
+If your terminal or locale cannot display Unicode box-drawing or symbols, the UI may show question marks. Deck now auto-detects non-UTF8 locales and falls back to ASCII characters. You can also force ASCII mode explicitly:
+
+```bash
+DECK_ASCII=1 deck "bun dev" "cargo watch"
+```
+
 ## Install
 
 ```bash

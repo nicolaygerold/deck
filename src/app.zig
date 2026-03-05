@@ -3,6 +3,43 @@ const vaxis = @import("vaxis");
 const proc = @import("process.zig");
 const LogBuffer = @import("buffer.zig").LogBuffer;
 
+// UI glyphs with ASCII fallbacks for non-UTF8 terminals
+const Glyphs = struct {
+    // separators & indicators
+    vert: []const u8,
+    select: []const u8,
+    dot: []const u8,
+    // status bar indicators
+    scroll_auto: []const u8,
+    scroll_manual: []const u8,
+};
+
+fn asciiRequestedOrNoUtf8(allocator: std.mem.Allocator) bool {
+    // Explicit opt-in wins
+    if (std.process.getEnvVarOwned(allocator, "DECK_ASCII")) |val| {
+        defer allocator.free(val);
+        if (std.ascii.eqlIgnoreCase(val, "1")) return true;
+        if (std.ascii.eqlIgnoreCase(val, "true")) return true;
+        if (std.ascii.eqlIgnoreCase(val, "yes")) return true;
+        if (std.ascii.eqlIgnoreCase(val, "on")) return true;
+        return false;
+    } else |_| {}
+
+    // Heuristics: prefer ASCII if locale is missing UTF-8
+    const keys = [_][]const u8{ "LC_ALL", "LC_CTYPE", "LANG" };
+    inline for (keys) |k| {
+        if (std.process.getEnvVarOwned(allocator, k)) |v| {
+            defer allocator.free(v);
+            // case-insensitive contains("UTF-8") / ("UTF8")
+            if (std.mem.indexOf(u8, v, "UTF-8") != null or std.mem.indexOf(u8, v, "utf-8") != null or std.mem.indexOf(u8, v, "UTF8") != null or std.mem.indexOf(u8, v, "utf8") != null) {
+                return false;
+            }
+        } else |_| {}
+    }
+    // Default to ASCII if nothing indicates UTF-8
+    return true;
+}
+
 pub const Event = union(enum) {
     key_press: vaxis.Key,
     mouse: vaxis.Mouse,
@@ -49,17 +86,37 @@ pub const App = struct {
     preserve_ansi: bool = false,
 
     tty_buf: [4096]u8 = undefined,
+    glyphs: Glyphs = .{ .vert = "│", .select = "▶", .dot = "●", .scroll_auto = "↓", .scroll_manual = "•" },
 
     pub fn init(allocator: std.mem.Allocator, manager: *proc.ProcessManager) !*App {
         const self = try allocator.create(App);
+        errdefer allocator.destroy(self);
+
         self.* = App{
             .manager = manager,
             .allocator = allocator,
             .vx = undefined,
             .tty = undefined,
         };
-        self.tty = try vaxis.Tty.init(&self.tty_buf);
+
+        // Initialize TTY first; this can fail in non-interactive environments
+        // (e.g., no controlling terminal, CI). Fail fast without leaking `self`.
+        self.tty = vaxis.Tty.init(&self.tty_buf) catch |e| {
+            // Propagate original error; caller will map to a user-facing message.
+            return e;
+        };
+        errdefer self.tty.deinit();
+
+        // Initialize Vaxis after TTY so we can deinit cleanly on subsequent failure.
         self.vx = try vaxis.Vaxis.init(allocator, .{});
+
+        // Choose glyph set based on environment capability
+        if (asciiRequestedOrNoUtf8(allocator)) {
+            self.glyphs = .{ .vert = "|", .select = ">", .dot = "*", .scroll_auto = "v", .scroll_manual = "." };
+        } else {
+            self.glyphs = .{ .vert = "│", .select = "▶", .dot = "●", .scroll_auto = "↓", .scroll_manual = "•" };
+        }
+
         self.folded_groups = std.AutoHashMap(usize, void).init(allocator);
         return self;
     }
@@ -81,10 +138,10 @@ pub const App = struct {
         defer loop.stop();
 
         try self.vx.enterAltScreen(self.tty.writer());
-        try self.vx.queryTerminal(self.tty.writer(), 100 * std.time.ns_per_ms);
-        try self.vx.setMouseMode(self.tty.writer(), true);
-        try self.vx.subscribeToColorSchemeUpdates(self.tty.writer());
-        try self.vx.queryColor(self.tty.writer(), .bg);
+        self.vx.queryTerminal(self.tty.writer(), 100 * std.time.ns_per_ms) catch {};
+        self.vx.setMouseMode(self.tty.writer(), true) catch {};
+        self.vx.subscribeToColorSchemeUpdates(self.tty.writer()) catch {};
+        self.vx.queryColor(self.tty.writer(), .bg) catch {};
 
         while (!self.should_quit) {
             // Read process output
@@ -107,7 +164,10 @@ pub const App = struct {
 
             // Render
             try self.render();
-            try self.vx.render(self.tty.writer());
+            if (self.vx.render(self.tty.writer())) |_| {} else |_| {
+                // If rendering fails, exit gracefully to restore terminal state
+                self.should_quit = true;
+            }
 
             // Small sleep to avoid busy loop
             std.Thread.sleep(16 * std.time.ns_per_ms);
@@ -524,10 +584,7 @@ pub const App = struct {
 
         // Draw separator
         for (0..height) |row| {
-            win.writeCell(sidebar_width, @intCast(row), .{
-                .char = .{ .grapheme = "│", .width = 1 },
-                .style = .{ .fg = .{ .index = 8 } },
-            });
+            _ = win.printSegment(.{ .text = self.glyphs.vert, .style = .{ .fg = .{ .index = 8 } } }, .{ .col_offset = sidebar_width, .row_offset = @intCast(row) });
         }
 
         // Draw log pane
@@ -556,11 +613,11 @@ pub const App = struct {
 
             // Selection indicator
             if (is_selected) {
-                _ = win.printSegment(.{ .text = "▶", .style = .{ .fg = .{ .index = 6 } } }, .{ .col_offset = 0, .row_offset = row });
+                _ = win.printSegment(.{ .text = self.glyphs.select, .style = .{ .fg = .{ .index = 6 } } }, .{ .col_offset = 0, .row_offset = row });
             }
 
             // Status dot
-            _ = win.printSegment(.{ .text = "●", .style = .{ .fg = status_color } }, .{ .col_offset = 2, .row_offset = row });
+            _ = win.printSegment(.{ .text = self.glyphs.dot, .style = .{ .fg = status_color } }, .{ .col_offset = 2, .row_offset = row });
 
             // Process name (truncate if needed)
             const max_name_len = width -| 5;
@@ -892,7 +949,7 @@ pub const App = struct {
         if (self.manager.processes.len > 0) {
             const log = &self.manager.processes[self.selected].log;
             var buf: [128]u8 = undefined;
-            const scroll_indicator = if (self.auto_scroll) "↓" else "•";
+            const scroll_indicator = if (self.auto_scroll) self.glyphs.scroll_auto else self.glyphs.scroll_manual;
             const wrap_tag = if (self.wrap_enabled) " wrap" else " trunc";
             const ts_tag = if (self.show_timestamps) " ts" else "";
             var hits_buf: [24]u8 = undefined;

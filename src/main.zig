@@ -97,13 +97,27 @@ fn runTui(allocator: std.mem.Allocator, commands: []const cli.Command) !void {
         std.debug.print("All processes terminated\n", .{});
     }
 
-    try manager.spawnAll();
+    // Preflight: if there's no tty on stdin/stdout, avoid invoking TTY init which would
+    // print a noisy stack trace from std.posix.unexpectedErrno. Provide a clear message instead.
+    if (!std.posix.isatty(std.posix.STDIN_FILENO) and !std.posix.isatty(std.posix.STDOUT_FILENO)) {
+        std.debug.print("Error: no TTY detected. The interactive UI requires a terminal.\n", .{});
+        std.debug.print("Hint: Run from a terminal, or use 'deck start' and 'deck logs' in headless mode.\n", .{});
+        return;
+    }
 
-    var app = try App.init(allocator, &manager);
+    // Initialize the TUI first so we can fail fast in non-interactive environments
+    // before spawning any child processes.
+    var app = App.init(allocator, &manager) catch |err| {
+        std.debug.print("Error: could not initialize TUI: {}\n", .{err});
+        std.debug.print("Hint: Run from a real terminal with a controlling TTY, or use 'deck start' and 'deck logs' in headless mode.\n", .{});
+        return;
+    };
     defer {
         app.deinit();
         allocator.destroy(app);
     }
+
+    try manager.spawnAll();
 
     try app.run();
 }
