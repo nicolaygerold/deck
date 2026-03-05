@@ -137,12 +137,20 @@ fn drawLogPane(win: *MockWindow, log: *const LogBuffer, start_col: u16, width: u
     var line_idx = start_line;
     while (line_idx < total_lines and row < height - 1) : (line_idx += 1) {
         if (log.getLine(line_idx)) |line| {
-            const max_len = @min(line.text.len, width);
-            for (line.text[0..max_len], 0..) |c, i| {
-                win.writeChar(start_col + @as(u16, @intCast(i)), row, c);
+            var text_offset: usize = 0;
+            while (text_offset < line.text.len and row < height - 1) {
+                const remaining = line.text.len - text_offset;
+                const chunk_len = @min(remaining, width);
+                const slice = line.text[text_offset .. text_offset + chunk_len];
+                for (slice, 0..) |c, i| {
+                    win.writeChar(start_col + @as(u16, @intCast(i)), row, c);
+                }
+                text_offset += chunk_len;
+                row += 1;
             }
+        } else {
+            row += 1;
         }
-        row += 1;
     }
 }
 
@@ -272,7 +280,7 @@ test "log pane respects scroll offset" {
     try std.testing.expect(std.mem.indexOf(u8, row2, "line3") != null);
 }
 
-test "log pane truncates long lines" {
+test "log pane wraps long lines" {
     var win = try MockWindow.init(std.testing.allocator, 20, 10);
     defer win.deinit();
 
@@ -283,11 +291,16 @@ test "log pane truncates long lines" {
 
     drawLogPane(&win, &log, 0, 20, 10, 0);
 
-    // Line should be truncated to width
+    // Line should wrap to multiple rows (first row up to width)
     const row2 = try win.getRowAlloc(2);
     defer std.testing.allocator.free(row2);
-    try std.testing.expect(row2.len <= 20);
+    try std.testing.expectEqual(@as(usize, 20), row2.len);
     try std.testing.expect(std.mem.indexOf(u8, row2, "this is a very long") != null);
+
+    const row3 = try win.getRowAlloc(3);
+    defer std.testing.allocator.free(row3);
+    try std.testing.expect(row3.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, row3, "should") != null);
 }
 
 test "log buffer handles rapid appends" {
